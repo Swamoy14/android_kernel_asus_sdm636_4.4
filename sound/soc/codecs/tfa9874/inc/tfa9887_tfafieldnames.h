@@ -6,8 +6,10 @@
  * published by the Free Software Foundation.
  *
  */
+
 #define TFA9887_I2CVERSION		34
 #define TFA9895_I2CVERSION		34
+
 #define TFA9887_NAMETABLE static tfaBfName_t Tfa9887DatasheetNames[]= {\
    { 0x402, "I2SF"},    /* I2SFormat data 1 input:                           , */\
    { 0x431, "CHS12"},    /* ChannelSelection data1 input  (In CoolFlux)       , */\

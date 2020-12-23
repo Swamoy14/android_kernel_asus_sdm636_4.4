@@ -6,7 +6,9 @@
  * published by the Free Software Foundation.
  *
  */
+
 #define TFA9897_I2CVERSION 34
+
 typedef enum nxpTfa1BfEnumList {
     TFA1_BF_VDDS  = 0x0000,    /*!< Power-on-reset flag                                */
     TFA1_BF_PLLS  = 0x0010,    /*!< PLL lock                                           */

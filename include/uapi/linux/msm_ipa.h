@@ -538,7 +538,6 @@ enum ipa_rm_resource_name {
  * @IPA_HW_v4_1: IPA hardware version 4.1
  * @IPA_HW_v4_2: IPA hardware version 4.2
  * @IPA_HW_v4_5: IPA hardware version 4.5
-
  */
 enum ipa_hw_type {
 	IPA_HW_None = 0,

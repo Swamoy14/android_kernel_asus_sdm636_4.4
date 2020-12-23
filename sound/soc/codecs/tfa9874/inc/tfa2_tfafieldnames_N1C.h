@@ -6,7 +6,9 @@
  * published by the Free Software Foundation.
  *
  */
+ 
 #define TFA9888_I2CVERSION 18
+
 typedef enum nxpTfa2BfEnumList {
     TFA2_BF_PWDN  = 0x0000,    /*!< Powerdown selection                                */
     TFA2_BF_I2CR  = 0x0010,    /*!< I2C Reset - Auto clear                             */
