@@ -2280,4 +2280,3 @@ int tfa_tib_dsp_msgmulti(struct tfa_device *tfa, int length, const char *buffer)
 
 	return 0;
 }
-

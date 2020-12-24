@@ -1563,4 +1563,3 @@ int read_bus_resources_from_dt(struct platform_device *pdev)
 
 	return msm_vidc_populate_bus(&pdev->dev, &core->resources);
 }
-

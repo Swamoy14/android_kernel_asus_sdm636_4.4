@@ -506,4 +506,5 @@
    { 0x8f0f, "production_data6"},    /* (key1 protected)                                  , */\
    { 0xffff,"Unknown bitfield enum" }    /* not found */\
 };
+
 #endif /* TFA_INC_TFA9891_TFAFIELDNAMES_H_ */

@@ -147,6 +147,4 @@ void ecryptfs_dump_cipher(struct ecryptfs_crypt_stat *stat)
 		ecryptfs_printk(KERN_DEBUG, "ecryptfs cipher mode is %s\n",
 				stat->cipher_mode);
 
-        ecryptfs_printk(KERN_DEBUG, "ecryptfs cipher mode is %s\n",
-                        stat->cipher_mode);
 }

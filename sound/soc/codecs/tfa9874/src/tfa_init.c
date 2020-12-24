@@ -1753,4 +1753,3 @@ void tfa9894_ops(struct tfa_device_ops *ops)
 	ops->set_osc_powerdown	= tfa9894_set_osc_powerdown;
 	ops->set_calib_state	= tfa9894_set_calib_state;
 }
-
