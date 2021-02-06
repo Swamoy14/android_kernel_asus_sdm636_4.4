@@ -4670,7 +4670,7 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 
 	atomic_inc(&entry->map_count);
 
-	trace_kgsl_mem_mmap(entry, vma->vm_start);
+//	trace_kgsl_mem_mmap(entry, vma->vm_start);
 	return 0;
 }
 
