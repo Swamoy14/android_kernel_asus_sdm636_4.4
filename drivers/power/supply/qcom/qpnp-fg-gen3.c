@@ -22,7 +22,7 @@
 #include <linux/qpnp/qpnp-revid.h>
 #include "fg-core.h"
 #include "fg-reg.h"
-#include <linux/switch.h>
+#include <linux/qpnp/qpnp-adc.h>
 
 #define FG_GEN3_DEV_NAME	"qcom,fg-gen3"
 
@@ -409,11 +409,6 @@ module_param_named(
 static int fg_restart;
 static bool fg_sram_dump;
 
-struct battery_name {
-	struct switch_dev battery_switch_dev;
-	char battery_name_type[100];
-} battery_name;
-
 /* All getters HERE */
 
 #define VOLTAGE_15BIT_MASK	GENMASK(14, 0)
@@ -642,24 +637,33 @@ static int fg_get_jeita_threshold(struct fg_chip *chip,
 #define BATT_TEMP_DENR		1
 static int fg_get_battery_temp(struct fg_chip *chip, int *val)
 {
-	int rc = 0, temp;
-	u8 buf[2];
+	int rc = 0;
+	int64_t temp;
+	struct qpnp_vadc_result result;
 
-	rc = fg_read(chip, BATT_INFO_BATT_TEMP_LSB(chip), buf, 2);
-	if (rc < 0) {
-		pr_err("failed to read addr=0x%04x, rc=%d\n",
-			BATT_INFO_BATT_TEMP_LSB(chip), rc);
+	chip->vadc_dev = qpnp_get_vadc(chip->dev, "vadc_therm");
+
+	if (IS_ERR(chip->vadc_dev)) {
+		rc = PTR_ERR(chip->vadc_dev);
+		if (rc != -EPROBE_DEFER)
+			pr_err("VADC property: vadc_therm missing\n");
 		return rc;
 	}
 
-	temp = ((buf[1] & BATT_TEMP_MSB_MASK) << 8) |
-		(buf[0] & BATT_TEMP_LSB_MASK);
-	temp = DIV_ROUND_CLOSEST(temp, 4);
 
-	/* Value is in Kelvin; Convert it to deciDegC */
-	temp = (temp - 273) * 10;
-	*val = temp;
-	return 0;
+	rc = qpnp_vadc_read(chip->vadc_dev, VADC_AMUX_THM3_PU2, &result);
+	if (!rc) {
+		temp = result.physical;
+		/* Value is in DegreeC; Convert it to deciDegC.
+		   Also, add an offset of -20 deciDegC, to report
+		   a more probable battery temperature. */
+		temp = (temp * 10) - 20;
+		*val = temp;
+		return rc;
+	} else {
+		pr_err("Unable to read battery_temp\n");
+		return rc;
+	}
 }
 
 static int fg_get_battery_resistance(struct fg_chip *chip, int *val)
@@ -785,8 +789,12 @@ static int fg_get_msoc(struct fg_chip *chip, int *msoc)
 	else if (*msoc == 0)
 		*msoc = 0;
 	else
-		*msoc = DIV_ROUND_CLOSEST((*msoc - 1) * (FULL_CAPACITY - 2),
-				FULL_SOC_RAW - 2) + 1;
+		*msoc = DIV_ROUND_CLOSEST(*msoc * FULL_CAPACITY,
+				FULL_SOC_RAW);
+
+	if (*msoc >= FULL_CAPACITY)
+		*msoc = FULL_CAPACITY;
+
 	return 0;
 }
 
@@ -949,24 +957,6 @@ static int fg_batt_missing_config(struct fg_chip *chip, bool enable)
 	return rc;
 }
 
-ssize_t battery_print_name(struct switch_dev *sdev,char *buf)
-{
-	return sprintf(buf,"%s\n",battery_name.battery_name_type);
-}
-static int battery_switch_register(void)
-{
-	int ret;
-	battery_name.battery_switch_dev.name="battery";
-	battery_name.battery_switch_dev.print_name=battery_print_name;
-	ret = switch_dev_register(&battery_name.battery_switch_dev);
-	if(ret<0)
-		return ret;
-	battery_name.battery_switch_dev.state=0;
-	switch_set_state(&battery_name.battery_switch_dev,
-		battery_name.battery_switch_dev.state);
-	return 0;
-}
-
 static int fg_get_batt_id(struct fg_chip *chip)
 {
 	int rc, ret, batt_id = 0;
@@ -1032,9 +1022,6 @@ static int fg_get_batt_profile(struct fg_chip *chip)
 		return rc;
 	}
 
-	strcpy(battery_name.battery_name_type,chip->bp.batt_type_str);
-	battery_switch_register();
-
 	rc = of_property_read_u32(profile_node, "qcom,max-voltage-uv",
 			&chip->bp.float_volt_uv);
 	if (rc < 0) {
@@ -1051,7 +1038,6 @@ static int fg_get_batt_profile(struct fg_chip *chip)
 
 	rc = of_property_read_u32(profile_node, "qcom,fg-cc-cv-threshold-mv",
 			&chip->bp.vbatt_full_mv);
-	printk("enter fg_get_batt_profile chip->bp.vbatt_full_mv=%d\n",chip->bp.vbatt_full_mv);
 	if (rc < 0) {
 		pr_err("battery cc_cv threshold unavailable, rc:%d\n", rc);
 		chip->bp.vbatt_full_mv = -EINVAL;
@@ -1877,10 +1863,8 @@ static int fg_charge_full_update(struct fg_chip *chip)
 			fg_dbg(chip, FG_STATUS, "Terminated charging @ SOC%d\n",
 				msoc);
 		}
-/* Huaqin modify for ZQL1650-750 optimize discharge capacity jump 1% by fangaijun at 2018/03/29 start*/
-	} else if ((msoc_raw <= recharge_soc || !chip->charge_done) && chip->charge_full) {
-		printk("enter fg_charge_full_update1\n");
-/* Huaqin modify for ZQL1650-750 optimize discharge capacity jump 1% by fangaijun at 2018/03/29 end*/
+	} else if ((msoc_raw <= recharge_soc || !chip->charge_done)
+			&& chip->charge_full) {
 		if (chip->dt.linearize_soc) {
 			chip->delta_soc = FULL_CAPACITY - msoc;
 
@@ -2051,7 +2035,7 @@ static int fg_set_constant_chg_voltage(struct fg_chip *chip, int volt_uv)
 {
 	u8 buf[2];
 	int rc;
-	printk("enter  fg_set_constant_chg_voltage volt_uv=%d\n",volt_uv);
+
 	if (volt_uv <= 0 || volt_uv > 15590000) {
 		pr_err("Invalid voltage %d\n", volt_uv);
 		return -EINVAL;
@@ -2599,7 +2583,8 @@ static void fg_ttf_update(struct fg_chip *chip)
 	chip->ttf.last_ttf = 0;
 	chip->ttf.last_ms = 0;
 	mutex_unlock(&chip->ttf.lock);
-	schedule_delayed_work(&chip->ttf_work, msecs_to_jiffies(delay_ms));
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->ttf_work, msecs_to_jiffies(delay_ms));
 }
 
 static void restore_cycle_counter(struct fg_chip *chip)
@@ -2757,7 +2742,6 @@ static void status_change_work(struct work_struct *work)
 	}
 
 	chip->charge_status = prop.intval;
-
 	rc = power_supply_get_property(chip->batt_psy,
 			POWER_SUPPLY_PROP_CHARGE_TYPE, &prop);
 	if (rc < 0) {
@@ -3143,8 +3127,9 @@ static void sram_dump_work(struct work_struct *work)
 	fg_dbg(chip, FG_STATUS, "SRAM Dump done at %lld.%d\n",
 		quotient, remainder);
 resched:
-	schedule_delayed_work(&chip->sram_dump_work,
-			msecs_to_jiffies(fg_sram_dump_period_ms));
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->sram_dump_work,
+		msecs_to_jiffies(fg_sram_dump_period_ms));
 }
 
 static int fg_sram_dump_sysfs(const char *val, const struct kernel_param *kp)
@@ -3171,8 +3156,9 @@ static int fg_sram_dump_sysfs(const char *val, const struct kernel_param *kp)
 
 	chip = power_supply_get_drvdata(bms_psy);
 	if (fg_sram_dump)
-		schedule_delayed_work(&chip->sram_dump_work,
-				msecs_to_jiffies(fg_sram_dump_period_ms));
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->sram_dump_work,
+			msecs_to_jiffies(fg_sram_dump_period_ms));
 	else
 		cancel_delayed_work_sync(&chip->sram_dump_work);
 
@@ -3235,7 +3221,7 @@ module_param_cb(restart, &fg_restart_ops, &fg_restart, 0644);
 static int fg_get_time_to_full_locked(struct fg_chip *chip, int *val)
 {
 	int rc, ibatt_avg, vbatt_avg, rbatt, msoc, full_soc, act_cap_mah,
-		i_cc2cv, soc_cc2cv, tau, divisor, iterm, ttf_mode,
+		i_cc2cv = 0, soc_cc2cv, tau, divisor, iterm, ttf_mode,
 		i, soc_per_step, msoc_this_step, msoc_next_step,
 		ibatt_this_step, t_predicted_this_step, ttf_slope,
 		t_predicted_cv, t_predicted = 0;
@@ -3734,8 +3720,9 @@ static void ttf_work(struct work_struct *work)
 		/* keep the wake lock and prime the IBATT and VBATT buffers */
 		if (ttf < 0) {
 			/* delay for one FG cycle */
-			schedule_delayed_work(&chip->ttf_work,
-							msecs_to_jiffies(1500));
+	                queue_delayed_work(system_power_efficient_wq,
+		                &chip->ttf_work,
+		                msecs_to_jiffies(1500));
 			mutex_unlock(&chip->ttf.lock);
 			return;
 		}
@@ -3751,7 +3738,8 @@ static void ttf_work(struct work_struct *work)
 	}
 
 	/* recurse every 10 seconds */
-	schedule_delayed_work(&chip->ttf_work, msecs_to_jiffies(10000));
+	queue_delayed_work(system_power_efficient_wq,
+		&chip->ttf_work, msecs_to_jiffies(10000));
 end_work:
 	vote(chip->awake_votable, TTF_PRIMING, false, 0);
 	mutex_unlock(&chip->ttf.lock);
@@ -3769,23 +3757,6 @@ static int fg_psy_get_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CAPACITY:
 		rc = fg_get_prop_capacity(chip, &pval->intval);
-		/*Huaqin modify for hold soc by diganyun at 2018/02/24 start */
-		#ifdef HQ_BUILD_FACTORY
-		/* if soc is 0, hold soc 1 when vol over 3.4v  */
-		if(1 > pval->intval) {
-			pr_info("func %s, cap below 1 = %d \n",__func__, pval->intval);
-			rc = fg_get_battery_voltage(chip, &pval->intval);
-			pr_info("vol = %d \n", pval->intval);
-			if(pval->intval > 3400000) {
-				pr_info(" vol below 3.4v = %d \n", pval->intval);
-				pval->intval = 1;
-			}else {
-				rc = fg_get_prop_capacity(chip, &pval->intval);
-				pr_info("still keep cap = %d \n",pval->intval);
-			}
-		}
-		#endif
-		/*Huaqin modify for hold soc by diganyun at 2018/02/24 end */
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_RAW:
 		rc = fg_get_msoc_raw(chip, &pval->intval);
@@ -4596,7 +4567,8 @@ static irqreturn_t fg_batt_missing_irq_handler(int irq, void *data)
 	}
 
 	clear_battery_profile(chip);
-	schedule_delayed_work(&chip->profile_load_work, 0);
+        queue_delayed_work(system_power_efficient_wq,
+    	        &chip->profile_load_work, 0);
 
 	if (chip->fg_psy)
 		power_supply_changed(chip->fg_psy);
@@ -5200,9 +5172,7 @@ static int fg_parse_dt(struct fg_chip *chip)
 			pr_warn("Error reading Jeita thresholds, default values will be used rc:%d\n",
 				rc);
 	}
-/* Huaqin modify for ZQL1650 Realize HW Jeita by fangaijun	at 2018/02/6 start */
-	printk("enter fg_parse_dt :HW jeita cold:%d,cool:%d,warm:%d,hot:%d\n", chip->dt.jeita_thresholds[JEITA_COLD],chip->dt.jeita_thresholds[JEITA_COOL] ,chip->dt.jeita_thresholds[JEITA_WARM],chip->dt.jeita_thresholds[JEITA_HOT]); 
-/* Huaqin modify for ZQL1650 Realize HW Jeita by fangaijun	at 2018/02/6 end */
+
 	if (of_property_count_elems_of_size(node,
 		"qcom,battery-thermal-coefficients",
 		sizeof(u8)) == BATT_THERM_NUM_COEFFS) {
@@ -5591,7 +5561,8 @@ static int fg_gen3_probe(struct platform_device *pdev)
 	}
 
 	device_init_wakeup(chip->dev, true);
-	schedule_delayed_work(&chip->profile_load_work, 0);
+	queue_delayed_work(system_power_efficient_wq,
+    	        &chip->profile_load_work, 0);
 
 	pr_debug("FG GEN3 driver probed successfully\n");
 	return 0;
@@ -5628,10 +5599,12 @@ static int fg_gen3_resume(struct device *dev)
 	if (rc < 0)
 		pr_err("Error in configuring ESR timer, rc=%d\n", rc);
 
-	schedule_delayed_work(&chip->ttf_work, 0);
+	queue_delayed_work(system_power_efficient_wq,
+	        &chip->ttf_work, 0);
 	if (fg_sram_dump)
-		schedule_delayed_work(&chip->sram_dump_work,
-				msecs_to_jiffies(fg_sram_dump_period_ms));
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->sram_dump_work,
+			msecs_to_jiffies(fg_sram_dump_period_ms));
 
 	if (!work_pending(&chip->status_change_work)) {
 		pm_stay_awake(chip->dev);
@@ -5662,16 +5635,6 @@ static void fg_gen3_shutdown(struct platform_device *pdev)
 {
 	struct fg_chip *chip = dev_get_drvdata(&pdev->dev);
 	int rc, bsoc;
-	u8 status;
-	rc = fg_read(chip, BATT_INFO_BATT_MISS_CFG(chip), &status, 1);
-	printk("fg_gen3_shutdown status0=%d\n",status);
-	rc = fg_masked_write(chip, BATT_INFO_BATT_MISS_CFG(chip),
-			BM_FROM_BATT_ID_BIT, 0);
-	if (rc < 0)
-		pr_err("Error in writing to %04x, rc=%d\n",
-			BATT_INFO_BATT_MISS_CFG(chip), rc);
-	rc = fg_read(chip, BATT_INFO_BATT_MISS_CFG(chip), &status, 1);
-	printk("fg_gen3_shutdown status1=%d\n",status);
 
 	if (chip->charge_full) {
 		rc = fg_get_sram_prop(chip, FG_SRAM_BATT_SOC, &bsoc);
