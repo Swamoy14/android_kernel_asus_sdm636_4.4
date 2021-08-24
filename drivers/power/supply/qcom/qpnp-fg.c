@@ -332,7 +332,7 @@ module_param_named(
 	battery_type, fg_batt_type, charp, 00600
 );
 
-static int fg_sram_update_period_ms = 30000;
+static int fg_sram_update_period_ms = 5000;
 module_param_named(
 	sram_update_period_ms, fg_sram_update_period_ms, int, 00600
 );
@@ -2020,6 +2020,12 @@ static void fg_handle_battery_insertion(struct fg_chip *chip)
 	schedule_delayed_work(&chip->update_sram_data, msecs_to_jiffies(0));
 }
 
+
+static int soc_to_setpoint(int soc)
+{
+	return DIV_ROUND_CLOSEST(soc * 255, 100);
+}
+
 static void batt_to_setpoint_adc(int vbatt_mv, u8 *data)
 {
 	int val;
@@ -2644,6 +2650,52 @@ resched:
 out:
 	fg_relax(&chip->update_sram_wakeup_source);
 	return rc;
+}
+
+#define SANITY_CHECK_PERIOD_MS	5000
+static void check_sanity_work(struct work_struct *work)
+{
+	struct fg_chip *chip = container_of(work,
+				struct fg_chip,
+				check_sanity_work.work);
+	int rc = 0;
+	u8 beat_count;
+	bool tried_once = false;
+
+	fg_stay_awake(&chip->sanity_wakeup_source);
+
+try_again:
+	rc = fg_read(chip, &beat_count,
+			chip->mem_base + MEM_INTF_FG_BEAT_COUNT, 1);
+	if (rc) {
+		pr_err("failed to read beat count rc=%d\n", rc);
+		goto resched;
+	}
+
+	if (fg_debug_mask & FG_STATUS)
+		pr_info("current: %d, prev: %d\n", beat_count,
+			chip->last_beat_count);
+
+	if (chip->last_beat_count == beat_count) {
+		if (!tried_once) {
+			/* Wait for 1 FG cycle and read it once again */
+			msleep(1500);
+			tried_once = true;
+			goto try_again;
+		} else {
+			pr_err("Beat count not updating\n");
+			fg_check_ima_error_handling(chip);
+			goto out;
+		}
+	} else {
+		chip->last_beat_count = beat_count;
+	}
+resched:
+	schedule_delayed_work(
+		&chip->check_sanity_work,
+		msecs_to_jiffies(SANITY_CHECK_PERIOD_MS));
+out:
+	fg_relax(&chip->sanity_wakeup_source);
 }
 
 #define SRAM_TIMEOUT_MS			3000
@@ -7976,7 +8028,7 @@ static int fg_common_hw_init(struct fg_chip *chip)
 	}
 
 	rc = fg_mem_masked_write(chip, settings[FG_MEM_DELTA_SOC].address, 0xFF,
-			settings[FG_MEM_DELTA_SOC].value,
+			soc_to_setpoint(settings[FG_MEM_DELTA_SOC].value),
 			settings[FG_MEM_DELTA_SOC].offset);
 	if (rc) {
 		pr_err("failed to write delta soc rc=%d\n", rc);

@@ -789,12 +789,8 @@ static int fg_get_msoc(struct fg_chip *chip, int *msoc)
 	else if (*msoc == 0)
 		*msoc = 0;
 	else
-		*msoc = DIV_ROUND_CLOSEST(*msoc * FULL_CAPACITY,
-				FULL_SOC_RAW);
-
-	if (*msoc >= FULL_CAPACITY)
-		*msoc = FULL_CAPACITY;
-
+		*msoc = DIV_ROUND_CLOSEST((*msoc - 1) * (FULL_CAPACITY - 2),
+				FULL_SOC_RAW - 2) + 1;
 	return 0;
 }
 
@@ -2119,7 +2115,15 @@ static int fg_adjust_recharge_soc(struct fg_chip *chip)
 				chip->recharge_soc_adjusted = true;
 			} else {
 				/* adjusted already, do nothing */
-				return 0;
+				if (chip->health != POWER_SUPPLY_HEALTH_GOOD)
+					return 0;
+
+				/*
+				 * Device is out of JEITA so restore the
+				 * default value
+				 */
+				new_recharge_soc = recharge_soc;
+				chip->recharge_soc_adjusted = false;
 			}
 		} else {
 			if (!chip->recharge_soc_adjusted)
@@ -2583,8 +2587,7 @@ static void fg_ttf_update(struct fg_chip *chip)
 	chip->ttf.last_ttf = 0;
 	chip->ttf.last_ms = 0;
 	mutex_unlock(&chip->ttf.lock);
-	queue_delayed_work(system_power_efficient_wq,
-		&chip->ttf_work, msecs_to_jiffies(delay_ms));
+	schedule_delayed_work(&chip->ttf_work, msecs_to_jiffies(delay_ms));
 }
 
 static void restore_cycle_counter(struct fg_chip *chip)
@@ -3127,9 +3130,8 @@ static void sram_dump_work(struct work_struct *work)
 	fg_dbg(chip, FG_STATUS, "SRAM Dump done at %lld.%d\n",
 		quotient, remainder);
 resched:
-	queue_delayed_work(system_power_efficient_wq,
-		&chip->sram_dump_work,
-		msecs_to_jiffies(fg_sram_dump_period_ms));
+	schedule_delayed_work(&chip->sram_dump_work,
+			msecs_to_jiffies(fg_sram_dump_period_ms));
 }
 
 static int fg_sram_dump_sysfs(const char *val, const struct kernel_param *kp)
@@ -3156,9 +3158,8 @@ static int fg_sram_dump_sysfs(const char *val, const struct kernel_param *kp)
 
 	chip = power_supply_get_drvdata(bms_psy);
 	if (fg_sram_dump)
-		queue_delayed_work(system_power_efficient_wq,
-			&chip->sram_dump_work,
-			msecs_to_jiffies(fg_sram_dump_period_ms));
+		schedule_delayed_work(&chip->sram_dump_work,
+				msecs_to_jiffies(fg_sram_dump_period_ms));
 	else
 		cancel_delayed_work_sync(&chip->sram_dump_work);
 
@@ -3720,9 +3721,8 @@ static void ttf_work(struct work_struct *work)
 		/* keep the wake lock and prime the IBATT and VBATT buffers */
 		if (ttf < 0) {
 			/* delay for one FG cycle */
-	                queue_delayed_work(system_power_efficient_wq,
-		                &chip->ttf_work,
-		                msecs_to_jiffies(1500));
+			schedule_delayed_work(&chip->ttf_work,
+							msecs_to_jiffies(1500));
 			mutex_unlock(&chip->ttf.lock);
 			return;
 		}
@@ -3738,8 +3738,7 @@ static void ttf_work(struct work_struct *work)
 	}
 
 	/* recurse every 10 seconds */
-	queue_delayed_work(system_power_efficient_wq,
-		&chip->ttf_work, msecs_to_jiffies(10000));
+	schedule_delayed_work(&chip->ttf_work, msecs_to_jiffies(10000));
 end_work:
 	vote(chip->awake_votable, TTF_PRIMING, false, 0);
 	mutex_unlock(&chip->ttf.lock);
@@ -4467,7 +4466,6 @@ static int fg_memif_init(struct fg_chip *chip)
 	return fg_ima_init(chip);
 }
 
-#ifndef CONFIG_MACH_ASUS_X00T
 static int fg_adjust_timebase(struct fg_chip *chip)
 {
 	int rc = 0, die_temp;
@@ -4501,7 +4499,6 @@ static int fg_adjust_timebase(struct fg_chip *chip)
 
 	return 0;
 }
-#endif
 
 /* INTERRUPT HANDLERS STAY HERE */
 
@@ -4567,8 +4564,7 @@ static irqreturn_t fg_batt_missing_irq_handler(int irq, void *data)
 	}
 
 	clear_battery_profile(chip);
-        queue_delayed_work(system_power_efficient_wq,
-    	        &chip->profile_load_work, 0);
+	schedule_delayed_work(&chip->profile_load_work, 0);
 
 	if (chip->fg_psy)
 		power_supply_changed(chip->fg_psy);
@@ -4611,11 +4607,10 @@ static irqreturn_t fg_delta_batt_temp_irq_handler(int irq, void *data)
 	chip->health = prop.intval;
 
 	if (chip->last_batt_temp != batt_temp) {
-#ifndef CONFIG_MACH_ASUS_X00T
 		rc = fg_adjust_timebase(chip);
 		if (rc < 0)
 			pr_err("Error in adjusting timebase, rc=%d\n", rc);
-#endif
+
 		rc = fg_adjust_recharge_voltage(chip);
 		if (rc < 0)
 			pr_err("Error in adjusting recharge_voltage, rc=%d\n",
@@ -4688,11 +4683,11 @@ static irqreturn_t fg_delta_msoc_irq_handler(int irq, void *data)
 	rc = fg_esr_validate(chip);
 	if (rc < 0)
 		pr_err("Error in validating ESR, rc=%d\n", rc);
-#ifndef CONFIG_MACH_ASUS_X00T
+
 	rc = fg_adjust_timebase(chip);
 	if (rc < 0)
 		pr_err("Error in adjusting timebase, rc=%d\n", rc);
-#endif
+
 	if (batt_psy_initialized(chip))
 		power_supply_changed(chip->batt_psy);
 
@@ -5173,6 +5168,9 @@ static int fg_parse_dt(struct fg_chip *chip)
 				rc);
 	}
 
+	chip->dt.jeita_thresholds[JEITA_WARM] = 97;
+	chip->dt.jeita_thresholds[JEITA_HOT] = 97;
+
 	if (of_property_count_elems_of_size(node,
 		"qcom,battery-thermal-coefficients",
 		sizeof(u8)) == BATT_THERM_NUM_COEFFS) {
@@ -5561,8 +5559,7 @@ static int fg_gen3_probe(struct platform_device *pdev)
 	}
 
 	device_init_wakeup(chip->dev, true);
-	queue_delayed_work(system_power_efficient_wq,
-    	        &chip->profile_load_work, 0);
+	schedule_delayed_work(&chip->profile_load_work, 0);
 
 	pr_debug("FG GEN3 driver probed successfully\n");
 	return 0;
@@ -5599,12 +5596,10 @@ static int fg_gen3_resume(struct device *dev)
 	if (rc < 0)
 		pr_err("Error in configuring ESR timer, rc=%d\n", rc);
 
-	queue_delayed_work(system_power_efficient_wq,
-	        &chip->ttf_work, 0);
+	schedule_delayed_work(&chip->ttf_work, 0);
 	if (fg_sram_dump)
-		queue_delayed_work(system_power_efficient_wq,
-			&chip->sram_dump_work,
-			msecs_to_jiffies(fg_sram_dump_period_ms));
+		schedule_delayed_work(&chip->sram_dump_work,
+				msecs_to_jiffies(fg_sram_dump_period_ms));
 
 	if (!work_pending(&chip->status_change_work)) {
 		pm_stay_awake(chip->dev);
